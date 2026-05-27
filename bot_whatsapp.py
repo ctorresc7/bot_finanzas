@@ -262,7 +262,7 @@ def webhook():
     data_cl = clasificar(body)
 
     if 'error' in data_cl:
-        send_message(from_num, f"⚠️ No pude procesar eso. Intenta de nuevo o escribe *ayuda*.")
+        send_message(from_num, f"⚠️ Error técnico: {data_cl.get('error','desconocido')[:200]}")
         return jsonify({'status': 'ok'})
 
     if not data_cl.get('importe'):
