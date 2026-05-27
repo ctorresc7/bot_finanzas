@@ -2,42 +2,38 @@
 BOT WHATSAPP — FINANZAS HOGAR
 Sthefanie & Christian
 
-Stack: Twilio (WhatsApp) + Flask + Claude API + Google Sheets API
-Hosting: Railway / Render (gratis)
+Stack: WhatsApp Cloud API (Meta) + Flask + Claude API + Google Sheets
+Hosting: Railway
 
 Flujo:
-  1. WhatsApp message → Twilio webhook → este script
+  1. WhatsApp message → Meta webhook → este script
   2. Claude clasifica el gasto/ingreso
   3. Bot responde pidiendo confirmación
   4. Usuario responde "si" → se escribe en Google Sheets
 """
 
-import os, json, re
+import os, json, re, requests
 from datetime import datetime
-from flask import Flask, request, Response
-from twilio.twiml.messaging_response import MessagingResponse
-from twilio.rest import Client
+from flask import Flask, request, jsonify
 import anthropic
 import gspread
 from google.oauth2.service_account import Credentials
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-ANTHROPIC_API_KEY   = os.environ['ANTHROPIC_API_KEY']
-TWILIO_ACCOUNT_SID  = os.environ['TWILIO_ACCOUNT_SID']
-TWILIO_AUTH_TOKEN   = os.environ['TWILIO_AUTH_TOKEN']
-TWILIO_WHATSAPP_NUM = os.environ['TWILIO_WHATSAPP_NUM']   # whatsapp:+14155238886
-GOOGLE_SHEET_ID     = os.environ['GOOGLE_SHEET_ID']       # ID del Google Sheet
-GOOGLE_CREDS_JSON   = os.environ['GOOGLE_CREDS_JSON']     # JSON de service account
+ANTHROPIC_API_KEY  = os.environ['ANTHROPIC_API_KEY']
+WA_TOKEN           = os.environ['WA_TOKEN']          # Token de acceso de Meta
+WA_PHONE_ID        = os.environ['WA_PHONE_ID']       # ID del número de WhatsApp
+WA_VERIFY_TOKEN    = os.environ['WA_VERIFY_TOKEN']   # Token que tú inventas para verificar webhook
+GOOGLE_SHEET_ID    = os.environ['GOOGLE_SHEET_ID']
+GOOGLE_CREDS_JSON  = os.environ['GOOGLE_CREDS_JSON']
 
-# Números autorizados → nombre
 USUARIOS = {
-    os.environ.get('PHONE_STHEFANIE', '+51000000000'): 'Sthefanie',
-    os.environ.get('PHONE_CHRISTIAN',  '+51000000001'): 'Christian',
+    os.environ.get('PHONE_STHEFANIE', '51000000000'): 'Sthefanie',
+    os.environ.get('PHONE_CHRISTIAN',  '51000000001'): 'Christian',
 }
 
 # ── CLIENTES ──────────────────────────────────────────────────────────────────
-claude  = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-twilio  = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 def get_sheet():
     creds_info = json.loads(GOOGLE_CREDS_JSON)
@@ -48,53 +44,10 @@ def get_sheet():
     gc = gspread.authorize(creds)
     return gc.open_by_key(GOOGLE_SHEET_ID).worksheet('REGISTRO')
 
-# ── ESTADO DE CONVERSACIÓN (en memoria, simple) ───────────────────────────────
-# { phone: { 'pending': {...}, 'step': 'confirm' } }
+# ── ESTADO DE CONVERSACIÓN ────────────────────────────────────────────────────
 sessions = {}
 
-# ── CATEGORIAS (espejo de la hoja CATEGORIAS) ─────────────────────────────────
-CATEGORIAS = [
-    ('Ingreso','Sueldo','Sueldo Sthefanie',['sueldo sthefanie','pago sthefanie']),
-    ('Ingreso','Sueldo','Sueldo Christian',['sueldo christian','pago christian']),
-    ('Ingreso','Alquiler auto','Alquiler auto',['yape auto','alquiler auto','renta auto',' auto ']),
-    ('Ingreso','Tarjeta alimentos','Tarjeta alimentos',['tarjeta alimentos','vale alimentos']),
-    ('Ingreso','Otros','Intereses / inversiones',['intereses','dividendos','rentabilidad']),
-    ('Ingreso','Otros','Otros ingresos',['ingreso','cobro','venta']),
-    ('Gasto','Tarjeta','Scotiabank Platinum',['scotiabank platinum','visa platinum']),
-    ('Gasto','Tarjeta','Scotiabank Singular',['scotiabank singular','visa singular']),
-    ('Gasto','Tarjeta','Falabella CMR',['falabella','cmr','saga']),
-    ('Gasto','Fijo hogar','Terreno',['terreno','lote','parcela']),
-    ('Gasto','Fijo hogar','Apoyo sobrino',['sobrino','apoyo']),
-    ('Gasto','Fijo hogar','Telefonía',['claro','movistar','entel','telefonia','celular']),
-    ('Gasto','Fijo hogar','Servicios Sthefanie',['servicio sthefanie','luz','agua','gas']),
-    ('Gasto','Fijo hogar','Servicios Christian',['servicio christian']),
-    ('Gasto','Variable','Supermercado / mercado',['metro','wong','tottus','plaza vea','makro','mercado','super']),
-    ('Gasto','Variable','Transporte / taxi / Uber',['uber','taxi','bus','combi','pasaje','transporte','cabify','indriver']),
-    ('Gasto','Variable','Gasolina',['gasolina','grifo','combustible','gasolinera']),
-    ('Gasto','Variable','Salud / farmacia',['farmacia','inkafarma','mifarma','medicina','pastillas']),
-    ('Gasto','Variable','Médico / clínica',['doctor','médico','clínica','hospital','consulta']),
-    ('Gasto','Variable','Educación',['colegio','universidad','curso','academia']),
-    ('Gasto','Variable','Higiene personal',['shampoo','jabón','higiene','desodorante']),
-    ('Gasto','Variable','Ropa / calzado',['ropa','viale','zapatillas','calzado','zara','hm']),
-    ('Gasto','No esencial','Restaurantes',['restaurante','polleria','cevichería','chifa','almuerzo','cena','comida']),
-    ('Gasto','No esencial','Delivery',['rappi','pedidosya','delivery','domicilio']),
-    ('Gasto','No esencial','Salidas / ocio',['salida','bar','antro','fiesta','cumple','karaoke']),
-    ('Gasto','No esencial','Cine / entretenimiento',['cine','cinemark','cineplanet','pelicula','concierto']),
-    ('Gasto','No esencial','Regalos',['regalo','obsequio','present']),
-    ('Gasto','No esencial','Viajes',['hotel','vuelo','airbnb','hostal','viaje','vacaciones']),
-    ('Gasto','No esencial','Suscripciones',['netflix','spotify','disney','amazon prime','youtube']),
-    ('Gasto','No esencial','Gastos hormiga',['café','cafetería','dulce','snack']),
-    ('Ahorro','Ahorros','Fondo de emergencia',['emergencia','fondo']),
-    ('Ahorro','Ahorros','Meta ahorro (viajes)',['ahorro viaje','meta viaje']),
-    ('Ahorro','Inversiones','Inversiones',['inversion','fondo mutuo','bolsa','acciones']),
-    ('Ahorro','Ahorros','Otros ahorros',['ahorro','guardar']),
-]
-
-MEDIOS = ['efectivo','yape','plin','scotiabank platinum','scotiabank singular',
-          'falabella','cmr','transferencia','débito','débito','visa']
-
 # ── CLASIFICADOR CON CLAUDE ───────────────────────────────────────────────────
-
 SYSTEM_PROMPT = """Eres el asistente financiero del hogar de Sthefanie y Christian en Lima, Perú.
 Tu única función es interpretar mensajes de gastos/ingresos en lenguaje natural y devolver un JSON estructurado.
 
@@ -125,7 +78,7 @@ Formato JSON de respuesta:
   "pregunta": null
 }"""
 
-def clasificar(texto: str) -> dict:
+def clasificar(texto):
     try:
         resp = claude.messages.create(
             model='claude-sonnet-4-20250514',
@@ -139,77 +92,83 @@ def clasificar(texto: str) -> dict:
     except Exception as e:
         return {'error': str(e)}
 
-# ── EMOJIS por tipo ───────────────────────────────────────────────────────────
+# ── ENVIAR MENSAJE POR META ───────────────────────────────────────────────────
+def send_message(to, text):
+    url = f"https://graph.facebook.com/v19.0/{WA_PHONE_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WA_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": text}
+    }
+    requests.post(url, headers=headers, json=payload)
+
+# ── MENSAJE DE CONFIRMACIÓN ───────────────────────────────────────────────────
 EMOJI = {
     'Ingreso': '🟢', 'Gasto': '🔴', 'Ahorro': '🔵',
     'No esencial': '🟣', 'Variable': '🟡', 'Fijo hogar': '🔴',
     'Tarjeta': '💳', 'Sueldo': '💼', 'Alquiler auto': '🚗',
 }
 
-def emoji_tipo(tipo, grupo):
-    return EMOJI.get(grupo, EMOJI.get(tipo, '📝'))
-
-# ── MENSAJE DE CONFIRMACIÓN ───────────────────────────────────────────────────
-def build_confirm_msg(data: dict, quien: str) -> str:
-    e = emoji_tipo(data.get('tipo',''), data.get('grupo',''))
-    importe = f"S/ {data['importe']:,.2f}" if data.get('importe') else '❓ (no detecté el monto)'
+def build_confirm_msg(data, quien):
+    e = EMOJI.get(data.get('grupo',''), EMOJI.get(data.get('tipo',''), '📝'))
+    importe = f"S/ {data['importe']:,.2f}" if data.get('importe') else '❓ no detecté el monto'
     cuotas = f" · {data['cuotas']} cuotas" if data.get('cuotas') and data['cuotas'] != '-' else ''
-    medio = data.get('medio', '—')
     lines = [
-        f"📋 *Antes de guardar, confirma:*",
-        f"",
+        "📋 *Antes de guardar, confirma:*",
+        "",
         f"{e} *{data.get('descripcion','—')}*",
         f"📂 {data.get('tipo','—')} → {data.get('grupo','—')} → {data.get('categoria','—')}",
         f"💰 {importe}{cuotas}",
-        f"💳 {medio}",
+        f"💳 {data.get('medio','—')}",
         f"👤 {quien}  ·  📅 {datetime.now().strftime('%d/%m/%Y %H:%M')}",
-        f"",
+        "",
     ]
     if data.get('duda'):
         lines.append(f"🤔 *Tengo una duda:* {data.get('pregunta','')}")
-        lines.append(f"")
-    lines.append(f"Responde *sí* para guardar, o corrígeme lo que esté mal.")
+        lines.append("")
+    lines.append("Responde *sí* para guardar, o corrígeme lo que esté mal.")
     return '\n'.join(lines)
 
-# ── ESCRIBIR EN GOOGLE SHEETS ─────────────────────────────────────────────────
-def guardar_en_sheet(data: dict, quien: str):
+# ── GUARDAR EN GOOGLE SHEETS ──────────────────────────────────────────────────
+def guardar_en_sheet(data, quien):
     now = datetime.now()
     sheet = get_sheet()
     row = [
-        now.strftime('%d/%m/%Y'),          # A Fecha
-        now.strftime('%H:%M'),              # B Hora
-        data.get('descripcion', ''),        # C Descripción
-        data.get('tipo', ''),               # D Tipo
-        data.get('grupo', ''),              # E Grupo
-        data.get('categoria', ''),          # F Categoría
-        data.get('importe', 0),             # G Importe
-        data.get('medio', ''),              # H Medio de pago
-        data.get('cuotas', '-'),            # I Cuotas
-        quien,                              # J Quién
-        now.month,                          # K Mes
-        data.get('notas', ''),              # L Notas
+        now.strftime('%d/%m/%Y'),
+        now.strftime('%H:%M'),
+        data.get('descripcion', ''),
+        data.get('tipo', ''),
+        data.get('grupo', ''),
+        data.get('categoria', ''),
+        data.get('importe', 0),
+        data.get('medio', ''),
+        data.get('cuotas', '-'),
+        quien,
+        now.month,
+        data.get('notas', ''),
     ]
     sheet.append_row(row, value_input_option='USER_ENTERED')
 
-# ── PARSING RÁPIDO DE CORRECCIONES ───────────────────────────────────────────
-def aplicar_correccion(pending: dict, texto: str) -> dict:
-    """Si el usuario dice 'el monto es 50' o 'es efectivo', corrige el pending."""
+# ── CORRECCIONES ──────────────────────────────────────────────────────────────
+def aplicar_correccion(pending, texto):
     t = texto.lower()
-    # Monto
     m = re.search(r'(\d+[\.,]?\d*)', t)
     if m and any(w in t for w in ['monto','importe','son','fue','es']):
         pending['importe'] = float(m.group(1).replace(',','.'))
-    # Medio
     for medio in ['efectivo','yape','plin','transferencia','débito','platinum','singular','cmr','falabella']:
         if medio in t:
             mapping = {
-                'platinum': 'Scotiabank Platinum', 'singular': 'Scotiabank Singular',
-                'falabella': 'Falabella CMR', 'cmr': 'Falabella CMR',
-                'yape': 'Yape/Plin', 'plin': 'Yape/Plin',
-                'efectivo': 'Efectivo', 'transferencia': 'Transferencia', 'débito': 'Débito',
+                'platinum':'Scotiabank Platinum','singular':'Scotiabank Singular',
+                'falabella':'Falabella CMR','cmr':'Falabella CMR',
+                'yape':'Yape/Plin','plin':'Yape/Plin',
+                'efectivo':'Efectivo','transferencia':'Transferencia','débito':'Débito',
             }
             pending['medio'] = mapping.get(medio, medio.capitalize())
-    # Cuotas
     m2 = re.search(r'(\d+)\s*cuotas?', t)
     if m2:
         pending['cuotas'] = m2.group(1)
@@ -218,105 +177,106 @@ def aplicar_correccion(pending: dict, texto: str) -> dict:
 # ── FLASK APP ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 
+@app.route('/webhook', methods=['GET'])
+def verify():
+    """Meta llama a este endpoint para verificar el webhook"""
+    mode      = request.args.get('hub.mode')
+    token     = request.args.get('hub.verify_token')
+    challenge = request.args.get('hub.challenge')
+    if mode == 'subscribe' and token == WA_VERIFY_TOKEN:
+        return challenge, 200
+    return 'Forbidden', 403
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    from_num = request.form.get('From', '').replace('whatsapp:', '')
-    body     = request.form.get('Body', '').strip()
-    quien    = USUARIOS.get(from_num, 'Desconocido')
+    data = request.get_json()
+    try:
+        entry    = data['entry'][0]
+        changes  = entry['changes'][0]
+        value    = changes['value']
+
+        # Ignorar notificaciones de estado (delivered, read, etc.)
+        if 'messages' not in value:
+            return jsonify({'status': 'ok'})
+
+        msg      = value['messages'][0]
+        from_num = msg['from']          # ej: 51997932962
+        body     = msg['text']['body'].strip()
+        quien    = USUARIOS.get(from_num, 'Desconocido')
+
+    except (KeyError, IndexError):
+        return jsonify({'status': 'ok'})
 
     if quien == 'Desconocido':
-        reply('Número no autorizado. Contacta a Sthefanie o Christian.', from_num)
-        return twiml_ok()
+        send_message(from_num, '⚠️ Número no autorizado.')
+        return jsonify({'status': 'ok'})
 
     sess = sessions.get(from_num, {})
 
-    # ── FLUJO PRINCIPAL ────────────────────────────────────────────────────────
-
-    # Comandos especiales
+    # ── Comandos especiales ────────────────────────────────────────────────────
     if body.lower() in ['ayuda', 'help', '?']:
-        msg = (
-            "*Cómo registrar:*\n"
-            "Escribe en lenguaje natural, por ejemplo:\n"
-            "• `almuerzo pollería 45 efectivo`\n"
-            "• `Rappi 35 yape`\n"
-            "• `Scotiabank Platinum 4005 transferencia`\n"
-            "• `sueldo mayo 5047`\n"
-            "• `yape auto 350 ingreso`\n\n"
-            "Siempre te pediré confirmación antes de guardar.\n"
+        send_message(from_num,
+            "📖 *Cómo registrar:*\n\n"
+            "Escribe en lenguaje natural:\n"
+            "• almuerzo pollería 45 efectivo\n"
+            "• Rappi 35 yape\n"
+            "• Scotiabank Platinum 4005 transferencia\n"
+            "• sueldo mayo ingreso\n"
+            "• yape auto 350 ingreso\n"
+            "• ropa Saga 230 Falabella 3 cuotas\n\n"
             "Escribe *cancelar* para anular."
         )
-        reply(msg, from_num)
-        return twiml_ok()
+        return jsonify({'status': 'ok'})
 
     if body.lower() in ['cancelar', 'cancel', 'no']:
         sessions.pop(from_num, None)
-        reply('❌ Registro cancelado. Cuando quieras, escribe tu gasto.', from_num)
-        return twiml_ok()
+        send_message(from_num, '❌ Registro cancelado.')
+        return jsonify({'status': 'ok'})
 
-    # ── Si hay pendiente esperando confirmación ────────────────────────────────
+    # ── Confirmación pendiente ─────────────────────────────────────────────────
     if sess.get('step') == 'confirm':
         t = body.lower().strip()
-
-        # Confirmación positiva
         if t in ['si','sí','yes','ok','dale','confirmar','guardar','correcto','bueno','ya']:
             try:
                 guardar_en_sheet(sess['pending'], quien)
-                imp = sess['pending'].get('importe', 0)
+                imp  = sess['pending'].get('importe', 0)
                 tipo = sess['pending'].get('tipo', 'Gasto')
-                emoji = '🟢' if tipo == 'Ingreso' else ('🔵' if tipo == 'Ahorro' else '🔴')
-                msg = (
+                e    = '🟢' if tipo == 'Ingreso' else ('🔵' if tipo == 'Ahorro' else '🔴')
+                send_message(from_num,
                     f"✅ *¡Guardado!*\n"
-                    f"{emoji} {sess['pending'].get('descripcion','')} — "
-                    f"S/ {imp:,.2f}\n"
-                    f"_Registrado en Google Sheets_ 📊"
+                    f"{e} {sess['pending'].get('descripcion','')} — S/ {imp:,.2f}\n"
+                    f"_Anotado en Google Sheets_ 📊"
                 )
                 sessions.pop(from_num, None)
-            except Exception as e:
-                msg = f"⚠️ Error al guardar: {e}\nIntenta de nuevo."
-            reply(msg, from_num)
-            return twiml_ok()
-
-        # Corrección parcial (no es ni sí ni no)
+            except Exception as ex:
+                send_message(from_num, f"⚠️ Error al guardar: {ex}")
         else:
             sess['pending'] = aplicar_correccion(sess['pending'], body)
             sessions[from_num] = sess
-            msg = build_confirm_msg(sess['pending'], quien)
-            msg += '\n\n_Apliqué tu corrección. ¿Ahora sí está bien?_'
-            reply(msg, from_num)
-            return twiml_ok()
+            msg_text = build_confirm_msg(sess['pending'], quien)
+            msg_text += '\n\n_Apliqué tu corrección. ¿Ahora sí?_'
+            send_message(from_num, msg_text)
+        return jsonify({'status': 'ok'})
 
-    # ── Nuevo mensaje → clasificar ─────────────────────────────────────────────
-    data = clasificar(body)
+    # ── Nuevo mensaje ──────────────────────────────────────────────────────────
+    data_cl = clasificar(body)
 
-    if 'error' in data:
-        reply(f"⚠️ No pude procesar eso: {data['error']}\nIntenta de nuevo o escribe *ayuda*.", from_num)
-        return twiml_ok()
+    if 'error' in data_cl:
+        send_message(from_num, f"⚠️ No pude procesar eso. Intenta de nuevo o escribe *ayuda*.")
+        return jsonify({'status': 'ok'})
 
-    if not data.get('importe'):
-        # Pedir el monto si no se detectó
-        sessions[from_num] = {'step': 'confirm', 'pending': data}
-        msg = (
-            f"Entendí: *{data.get('descripcion','—')}*\n"
-            f"Categoría: {data.get('categoria','—')}\n\n"
-            f"🤔 No detecté el monto. ¿Cuánto fue?"
+    if not data_cl.get('importe'):
+        sessions[from_num] = {'step': 'confirm', 'pending': data_cl}
+        send_message(from_num,
+            f"Entendí: *{data_cl.get('descripcion','—')}*\n"
+            f"Categoría: {data_cl.get('categoria','—')}\n\n"
+            f"🤔 ¿Cuánto fue el monto?"
         )
-        reply(msg, from_num)
-        return twiml_ok()
+        return jsonify({'status': 'ok'})
 
-    # Guardar pending y pedir confirmación
-    sessions[from_num] = {'step': 'confirm', 'pending': data}
-    reply(build_confirm_msg(data, quien), from_num)
-    return twiml_ok()
-
-def reply(msg: str, to: str):
-    twilio.messages.create(
-        body=msg,
-        from_=TWILIO_WHATSAPP_NUM,
-        to=f'whatsapp:{to}'
-    )
-
-def twiml_ok():
-    return Response(str(MessagingResponse()), mimetype='text/xml')
+    sessions[from_num] = {'step': 'confirm', 'pending': data_cl}
+    send_message(from_num, build_confirm_msg(data_cl, quien))
+    return jsonify({'status': 'ok'})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
