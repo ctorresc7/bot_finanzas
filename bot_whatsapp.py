@@ -81,7 +81,7 @@ Formato JSON de respuesta:
 def clasificar(texto):
     try:
         resp = claude.messages.create(
-            model='claude-3-5-haiku-20241022',
+            model=os.environ.get('ANTHROPIC_MODEL', 'claude-3-haiku-20240307'),
             max_tokens=400,
             system=SYSTEM_PROMPT,
             messages=[{'role': 'user', 'content': texto}]
