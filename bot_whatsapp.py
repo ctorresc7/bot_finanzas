@@ -157,6 +157,12 @@ def agregar_categoria_nueva(tipo, grupo, categoria, palabras_clave=''):
 def guardar_en_sheet(data, quien):
     now = datetime.now(LIMA_TZ)
     sheet = get_sheet()
+    # Asegurar que importe siempre sea número
+    try:
+        importe = float(str(data.get('importe', 0)).replace(',','.').replace('S/','').strip())
+    except:
+        importe = 0.0
+
     row = [
         now.strftime('%d/%m/%Y'),
         now.strftime('%H:%M'),
@@ -164,7 +170,7 @@ def guardar_en_sheet(data, quien):
         data.get('tipo', ''),
         data.get('grupo', ''),
         data.get('categoria', ''),
-        data.get('importe', 0),
+        importe,
         data.get('medio', ''),
         data.get('cuotas', '-'),
         quien,
