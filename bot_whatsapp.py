@@ -13,7 +13,8 @@ Flujo:
 """
 
 import os, json, re, requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+LIMA_TZ = timezone(timedelta(hours=-5))
 from flask import Flask, request, jsonify
 import anthropic
 import gspread
@@ -61,9 +62,11 @@ Reglas:
   Ingresos: Sueldo Sthefanie, Sueldo Christian, Alquiler auto, Tarjeta alimentos, Intereses / inversiones, Otros ingresos
   Gastos fijos: Scotiabank Platinum, Scotiabank Singular, Falabella CMR, Terreno, Apoyo sobrino, Telefonía, Servicios Sthefanie, Servicios Christian
   Gastos variables: Supermercado / mercado, Transporte / taxi / Uber, Gasolina, Salud / farmacia, Médico / clínica, Educación, Higiene personal, Ropa / calzado
-  No esenciales: Restaurantes, Delivery, Salidas / ocio, Cine / entretenimiento, Regalos, Viajes, Suscripciones, Gastos hormiga, Otros no esenciales
+  No esencial: Restaurantes, Delivery, Salidas / ocio, Cine / entretenimiento, Regalos, Viajes, Suscripciones, Gastos hormiga, Otros no esenciales
   Ahorros: Fondo de emergencia, Meta ahorro (viajes), Inversiones, Otros ahorros
-- Si tienes dudas sobre la categoría, pon "duda": true y explica en "pregunta" qué necesitas saber.
+- Si NINGUNA categoría de la lista encaja bien, pon "categoria_nueva": true y sugiere un nombre en "categoria_sugerida".
+- Incluye siempre un campo "confianza": "alta", "media" o "baja" según qué tan seguro estás de la categoría.
+- "baja" = no estás seguro, "media" = probable, "alta" = muy seguro.
 
 Formato JSON de respuesta:
 {
@@ -74,8 +77,9 @@ Formato JSON de respuesta:
   "importe": 45.00,
   "medio": "Efectivo|Yape/Plin|Scotiabank Platinum|Scotiabank Singular|Falabella CMR|Transferencia|Débito",
   "cuotas": "-",
-  "duda": false,
-  "pregunta": null
+  "confianza": "alta|media|baja",
+  "categoria_nueva": false,
+  "categoria_sugerida": null
 }"""
 
 def clasificar(texto):
@@ -135,8 +139,23 @@ def build_confirm_msg(data, quien):
     return '\n'.join(lines)
 
 # ── GUARDAR EN GOOGLE SHEETS ──────────────────────────────────────────────────
+
+def agregar_categoria_nueva(tipo, grupo, categoria, palabras_clave=''):
+    """Agrega una nueva categoría a la hoja CATEGORIAS del sheet."""
+    try:
+        creds_info = json.loads(GOOGLE_CREDS_JSON)
+        from google.oauth2.service_account import Credentials as Creds3
+        creds3 = Creds3.from_service_account_info(creds_info, scopes=['https://www.googleapis.com/auth/spreadsheets'])
+        import gspread as gs3
+        gc3 = gs3.authorize(creds3)
+        sheet_cats = gc3.open_by_key(GOOGLE_SHEET_ID).worksheet('CATEGORIAS')
+        sheet_cats.append_row([tipo, grupo, categoria, palabras_clave], value_input_option='USER_ENTERED')
+        return True
+    except Exception as ex:
+        return False
+
 def guardar_en_sheet(data, quien):
-    now = datetime.now()
+    now = datetime.now(LIMA_TZ)
     sheet = get_sheet()
     row = [
         now.strftime('%d/%m/%Y'),
@@ -170,11 +189,18 @@ def guardar_en_sheet(data, quien):
         def hex_rgb(h):
             return {'red':int(h[0:2],16)/255,'green':int(h[2:4],16)/255,'blue':int(h[4:6],16)/255}
         thin = {'style':'SOLID','color':{'red':0.8,'green':0.8,'blue':0.8},'width':1}
-        spreadsheet.batch_update({'requests':[{'repeatCell':{
-            'range':{'sheetId':sheet_id,'startRowIndex':last_row-1,'endRowIndex':last_row,'startColumnIndex':0,'endColumnIndex':12},
-            'cell':{'userEnteredFormat':{'backgroundColor':hex_rgb(bg),'textFormat':{'fontFamily':'Arial','fontSize':9},'verticalAlignment':'MIDDLE','borders':{'top':thin,'bottom':thin,'left':thin,'right':thin}}},
-            'fields':'userEnteredFormat(backgroundColor,textFormat,verticalAlignment,borders)'
-        }}]})
+        spreadsheet.batch_update({'requests':[
+            {'repeatCell':{
+                'range':{'sheetId':sheet_id,'startRowIndex':last_row-1,'endRowIndex':last_row,'startColumnIndex':0,'endColumnIndex':12},
+                'cell':{'userEnteredFormat':{'backgroundColor':hex_rgb(bg),'textFormat':{'fontFamily':'Arial','fontSize':9},'verticalAlignment':'MIDDLE','borders':{'top':thin,'bottom':thin,'left':thin,'right':thin}}},
+                'fields':'userEnteredFormat(backgroundColor,textFormat,verticalAlignment,borders)'
+            }},
+            {'repeatCell':{
+                'range':{'sheetId':sheet_id,'startRowIndex':last_row-1,'endRowIndex':last_row,'startColumnIndex':6,'endColumnIndex':7},
+                'cell':{'userEnteredFormat':{'numberFormat':{'type':'CURRENCY','pattern':'S/ #,##0.00'}}},
+                'fields':'userEnteredFormat.numberFormat'
+            }},
+        ]})
     except Exception:
         pass
 
@@ -260,24 +286,68 @@ def webhook():
     # ── Confirmación pendiente ─────────────────────────────────────────────────
     if sess.get('step') == 'confirm':
         t = body.lower().strip()
+
+        # Guardar con categoría nueva confirmada
+        if t == 'nueva' or sess.get('step') == 'nueva_cat':
+            pending = sess.get('pending', {})
+            cat_sugerida = pending.get('categoria_sugerida') or pending.get('categoria', 'Nueva categoría')
+            tipo_cat = pending.get('tipo', 'Gasto')
+            grupo_cat = pending.get('grupo', 'Variable')
+
+            if t == 'nueva':
+                # Pedir confirmación del nombre
+                sessions[from_num] = {'step': 'nueva_cat', 'pending': pending}
+                send_message(from_num,
+                    f"🆕 *Crear nueva categoría*\n\n"
+                    f"Nombre sugerido: *{cat_sugerida}*\n"
+                    f"Tipo: {tipo_cat} | Grupo: {grupo_cat}\n\n"
+                    f"Responde *sí* para crearla con ese nombre, o escribe el nombre que prefieras."
+                )
+                return jsonify({'status': 'ok'})
+
+            if sess.get('step') == 'nueva_cat':
+                # Confirmar o usar nombre escrito
+                nombre_final = cat_sugerida if t in ['si','sí','yes','ok'] else body.strip()
+                pending['categoria'] = nombre_final
+                ok = agregar_categoria_nueva(tipo_cat, grupo_cat, nombre_final)
+                guardar_en_sheet(pending, quien)
+                imp = pending.get('importe', 0)
+                msg_cat = (f"✅ *¡Guardado!*\n"
+                           f"🆕 Categoría *{nombre_final}* {'agregada al sheet' if ok else '(no se pudo agregar al sheet)'}\n"
+                           f"📊 {pending.get('descripcion','')} — S/ {imp:,.2f}")
+                send_message(from_num, msg_cat)
+                sessions.pop(from_num, None)
+                return jsonify({'status': 'ok'})
+
+        # Confirmación positiva normal
         if t in ['si','sí','yes','ok','dale','confirmar','guardar','correcto','bueno','ya']:
             try:
                 guardar_en_sheet(sess['pending'], quien)
                 imp  = sess['pending'].get('importe', 0)
                 tipo = sess['pending'].get('tipo', 'Gasto')
                 e    = '🟢' if tipo == 'Ingreso' else ('🔵' if tipo == 'Ahorro' else '🔴')
+                cat  = sess['pending'].get('categoria','')
                 send_message(from_num,
                     f"✅ *¡Guardado!*\n"
                     f"{e} {sess['pending'].get('descripcion','')} — S/ {imp:,.2f}\n"
+                    f"🏷️ {cat}\n"
                     f"_Anotado en Google Sheets_ 📊"
                 )
                 sessions.pop(from_num, None)
             except Exception as ex:
                 send_message(from_num, f"⚠️ Error al guardar: {ex}")
+
+        # Corrección de categoría por confianza baja
         else:
-            sess['pending'] = aplicar_correccion(sess['pending'], body)
-            sessions[from_num] = sess
-            msg_text = build_confirm_msg(sess['pending'], quien)
+            pending = sess['pending']
+            # Si escribe una categoría nueva directamente
+            if len(body) > 3 and body[0].isupper():
+                pending['categoria'] = body.strip()
+                pending['confianza'] = 'alta'
+            else:
+                pending = aplicar_correccion(pending, body)
+            sessions[from_num] = {'step': 'confirm', 'pending': pending}
+            msg_text = build_confirm_msg(pending, quien)
             msg_text += '\n\n_Apliqué tu corrección. ¿Ahora sí?_'
             send_message(from_num, msg_text)
         return jsonify({'status': 'ok'})
