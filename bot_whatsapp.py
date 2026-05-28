@@ -58,11 +58,12 @@ Reglas:
 - Detecta el medio de pago si lo mencionan.
 - Detecta si es en cuotas (ej: "3 cuotas", "cuotas").
 - Clasifica el tipo: Ingreso, Gasto o Ahorro.
+- El campo "grupo" DEBE ser exactamente uno de estos valores: Sueldo, Alquiler auto, Tarjeta alimentos, Otros, Tarjeta, Fijo hogar, Variable, No esencial, Ahorros, Inversiones.
 - Elige la categoría más apropiada de esta lista exacta:
   Ingresos: Sueldo Sthefanie, Sueldo Christian, Alquiler auto, Tarjeta alimentos, Intereses / inversiones, Otros ingresos
-  Gastos fijos: Scotiabank Platinum, Scotiabank Singular, Falabella CMR, Terreno, Apoyo sobrino, Telefonía, Servicios Sthefanie, Servicios Christian
-  Gastos variables: Supermercado / mercado, Transporte / taxi / Uber, Gasolina, Salud / farmacia, Médico / clínica, Educación, Higiene personal, Ropa / calzado
-  No esencial: Restaurantes, Delivery, Salidas / ocio, Cine / entretenimiento, Regalos, Viajes, Suscripciones, Gastos hormiga, Otros no esenciales
+  Fijo hogar (grupo exacto: "Fijo hogar"): Scotiabank Platinum, Scotiabank Singular, Falabella CMR, Terreno, Apoyo sobrino, Telefonía, Servicios Sthefanie, Servicios Christian
+  Variable (grupo exacto: "Variable"): Supermercado / mercado, Transporte / taxi / Uber, Gasolina, Salud / farmacia, Médico / clínica, Educación, Higiene personal, Ropa / calzado
+  No esencial (grupo exacto: "No esencial"): Restaurantes, Delivery, Salidas / ocio, Cine / entretenimiento, Regalos, Viajes, Suscripciones, Gastos hormiga, Otros no esenciales
   Ahorros: Fondo de emergencia, Meta ahorro (viajes), Inversiones, Otros ahorros
 - Si NINGUNA categoría de la lista encaja bien, pon "categoria_nueva": true y sugiere un nombre en "categoria_sugerida".
 - Incluye siempre un campo "confianza": "alta", "media" o "baja" según qué tan seguro estás de la categoría.
@@ -72,7 +73,7 @@ Formato JSON de respuesta:
 {
   "descripcion": "texto limpio del gasto",
   "tipo": "Gasto|Ingreso|Ahorro",
-  "grupo": "nombre del grupo",
+  "grupo": "Sueldo|Alquiler auto|Tarjeta alimentos|Otros|Tarjeta|Fijo hogar|Variable|No esencial|Ahorros|Inversiones",
   "categoria": "nombre exacto de la categoría",
   "importe": 45.00,
   "medio": "Efectivo|Yape/Plin|Scotiabank Platinum|Scotiabank Singular|Falabella CMR|Transferencia|Débito",
