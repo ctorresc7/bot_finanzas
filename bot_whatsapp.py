@@ -154,6 +154,30 @@ def guardar_en_sheet(data, quien):
     ]
     sheet.append_row(row, value_input_option='USER_ENTERED')
 
+    # Formato automático por tipo
+    try:
+        tipo = data.get('tipo', 'Gasto')
+        color_map = {'Ingreso': 'E6F4EC', 'Ahorro': 'E1F5EE', 'Gasto': 'FCEBEB'}
+        bg = color_map.get(tipo, 'FFFFFF')
+        last_row = len(sheet.get_all_values())
+        creds_info = json.loads(GOOGLE_CREDS_JSON)
+        from google.oauth2.service_account import Credentials as Creds2
+        creds2 = Creds2.from_service_account_info(creds_info, scopes=['https://www.googleapis.com/auth/spreadsheets'])
+        import gspread as gs2
+        gc2 = gs2.authorize(creds2)
+        spreadsheet = gc2.open_by_key(GOOGLE_SHEET_ID)
+        sheet_id = spreadsheet.worksheet('REGISTRO').id
+        def hex_rgb(h):
+            return {'red':int(h[0:2],16)/255,'green':int(h[2:4],16)/255,'blue':int(h[4:6],16)/255}
+        thin = {'style':'SOLID','color':{'red':0.8,'green':0.8,'blue':0.8},'width':1}
+        spreadsheet.batch_update({'requests':[{'repeatCell':{
+            'range':{'sheetId':sheet_id,'startRowIndex':last_row-1,'endRowIndex':last_row,'startColumnIndex':0,'endColumnIndex':12},
+            'cell':{'userEnteredFormat':{'backgroundColor':hex_rgb(bg),'textFormat':{'fontFamily':'Arial','fontSize':9},'verticalAlignment':'MIDDLE','borders':{'top':thin,'bottom':thin,'left':thin,'right':thin}}},
+            'fields':'userEnteredFormat(backgroundColor,textFormat,verticalAlignment,borders)'
+        }}]})
+    except Exception:
+        pass
+
 # ── CORRECCIONES ──────────────────────────────────────────────────────────────
 def aplicar_correccion(pending, texto):
     t = texto.lower()
